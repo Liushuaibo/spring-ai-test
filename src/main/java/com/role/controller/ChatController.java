@@ -2,16 +2,24 @@ package com.role.controller;
 
 import com.role.pojo.response.ChatRequest;
 import com.role.pojo.response.Result;
+import org.codehaus.groovy.runtime.StringGroovyMethods;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.InMemoryChatMemory;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.prompt.SystemPromptTemplate;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.reader.TextReader;
+import org.springframework.ai.transformer.splitter.TokenTextSplitter;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -22,6 +30,10 @@ public class ChatController {
 
     private final ChatMemory chatMemory; // 会话记忆
 
+    private final VectorStore vectorStore;
+
+
+
     // 1. 从 application.yml 中读取模板和默认语气
     @Value("${my-ai.system-template}")
     private String systemTemplateStr;
@@ -31,7 +43,8 @@ public class ChatController {
 
 
     // 构造器注入 ChatClient
-    public ChatController(ChatClient.Builder chatClientBuilder) {
+    public ChatController(ChatClient.Builder chatClientBuilder, VectorStore vectorStore) {
+        this.vectorStore = vectorStore;
         // 使用内存存储对话历史（企业级通常会换成 Redis 或数据库存储）
         this.chatMemory = new InMemoryChatMemory();
 
@@ -40,6 +53,10 @@ public class ChatController {
                 .defaultAdvisors(new MessageChatMemoryAdvisor(chatMemory))
                 .build();
     }
+
+
+
+
 
     @PostMapping("/chat")
     public Result<String> chat(@RequestBody ChatRequest request) {
@@ -125,4 +142,63 @@ public class ChatController {
             return Result.error("AI调用失败: " + e.getMessage());
         }
     }
+
+
+    // 测试 RAG 环境的接口
+    @GetMapping("/test-rag")
+    public Result<String> testRag() {
+        try {
+            // 1. 准备一条测试数据（模拟公司的开发规范）
+            Document doc = new Document("公司规定：Java代码中的变量命名必须使用小驼峰命名法。");
+
+            // 2. 存入向量数据库（Spring AI 会自动调用 Embedding 模型把这句话变成数字存起来）
+            vectorStore.add(List.of(doc));
+
+            // 3. 从向量数据库中检索（模拟用户提问）
+            List<Document> results = vectorStore.similaritySearch(
+                    SearchRequest.query("Java变量怎么命名？").withTopK(1)
+            );
+
+            // 4. 返回检索到的内容
+            if (!results.isEmpty()) {
+                return Result.success("检索成功，最相关的规范是：" + results.get(0).getContent());
+            } else {
+                return Result.success("未检索到相关内容");
+            }
+        } catch (Exception e) {
+            return Result.error("RAG环境测试失败: " + e.getMessage());
+        }
+    }
+
+
+    // 测试文读取和分割接口
+    @GetMapping("/test-split")
+    public Result<List<String>> testDoucementSplit(){
+        try {
+            //读取文件
+            TextReader textReader = new TextReader(new ClassPathResource("java-spec.txt"));
+            //设置读取时的编码格式,防止中文乱码
+            textReader.getCustomMetadata().put("charset","utf-8");
+            //读取文件
+            List<Document> rowDocs = textReader.get();
+            // 2. 使用 TokenTextSplitter 对文档进行切分
+            // 参数说明：
+            // 1000: 每个文本块的最大 Token 数量
+            // 400: 相邻文本块之间的重叠 Token 数量（保留上下文）
+            // 5: 最小文本块大小
+            // 10000: 最大文本块大小
+            // true: 是否保持段落结构
+            TokenTextSplitter tokenTextSplitter = new TokenTextSplitter(1000, 400, 5, 10000, true);
+            List<Document> splitDocs = tokenTextSplitter.apply(rowDocs);
+
+            //3.提取切分后的内容,返回给前端
+            List<String> chunkContents = splitDocs.stream().map(Document::getContent).toList();
+            return Result.success(chunkContents);
+
+        }catch (Exception e){
+            return Result.error("文档切分失败: " + e.getMessage());
+        }
+
+    }
+
 }

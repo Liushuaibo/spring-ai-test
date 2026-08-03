@@ -82,6 +82,14 @@
             <artifactId>spring-boot-starter-webflux</artifactId>
         </dependency>
 
+
+
+        <!-- Spring AI 核心依赖（如果你第一周已经引入了 BOM，这里不需要写版本号） -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-core</artifactId>
+        </dependency>
+
     </dependencies>
 
 
