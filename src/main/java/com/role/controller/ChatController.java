@@ -21,6 +21,7 @@ import reactor.core.publisher.Flux;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api")
@@ -199,6 +200,145 @@ public class ChatController {
             return Result.error("文档切分失败: " + e.getMessage());
         }
 
+    }
+
+
+    // 新增：初始化企业私有知识库接口
+    @GetMapping("/init-knowledge")
+    public Result<String> initKnowledgeBase() {
+        try {
+            // 1. 读取并切分文档（复用昨天的逻辑）
+            TextReader textReader = new TextReader(new ClassPathResource("java-spec.txt"));
+            textReader.getCustomMetadata().put("charset", "UTF-8");
+            List<Document> rawDocs = textReader.get();
+
+//            TokenTextSplitter splitter = new TokenTextSplitter(1000, 400, 5, 10000, true);
+            TokenTextSplitter splitter = new TokenTextSplitter(1000, 100, 5, 10000, true);
+
+            List<Document> splitDocs = splitter.apply(rawDocs);
+
+            // 2. 为每个文本块添加元数据（Metadata），方便后续溯源
+            for (Document doc : splitDocs) {
+                doc.getMetadata().put("source", "java-spec.txt");
+                doc.getMetadata().put("type", "开发规范");
+            }
+
+            // 3. 存入向量数据库
+            // 注意：当调用 add 方法时，Spring AI 会自动调用 Embedding 模型，
+            // 把 splitDocs 里的文本转换成向量，并连同原文本一起存入 VectorStore
+            vectorStore.add(splitDocs);
+
+            return Result.success("知识库初始化成功！共存入 " + splitDocs.size() + " 个知识片段。");
+        } catch (Exception e) {
+            return Result.error("知识库初始化失败: " + e.getMessage());
+        }
+    }
+
+    // 新增：测试语义检索接口
+    @GetMapping("/test-search")
+    public Result<List<Map<String, Object>>> testSearch(String question) {
+        try {
+            // 1. 构建检索请求
+            // withTopK(3) 表示最多返回 3 个最相关的片段
+            // withSimilarityThreshold(0.6) 表示相似度必须大于 0.6 才算命中
+            SearchRequest searchRequest = SearchRequest.query(question)
+                    .withTopK(3)
+                    .withSimilarityThreshold(0.33);
+
+            // 2. 执行相似度搜索
+            List<Document> results = vectorStore.similaritySearch(searchRequest);
+
+            // 3. 组装返回结果，把文本内容和相似度得分展示出来
+            List<Map<String, Object>> responseList = results.stream().map(doc -> {
+                Map<String, Object> map = new java.util.HashMap<>();
+                map.put("content", doc.getContent());
+                // 注意：部分版本的 Spring AI 获取相似度得分的方法可能是 doc.getMetadata().get("distance")
+                // 或者直接通过 SearchRequest 的返回结果获取，这里为了直观展示，先返回文本内容
+                map.put("source", doc.getMetadata().get("source"));
+                return map;
+            }).toList();
+
+            return Result.success(responseList);
+        } catch (Exception e) {
+            return Result.error("语义检索失败: " + e.getMessage());
+        }
+    }
+
+
+    // 终极 RAG 问答接口
+    @PostMapping("/chat/rag")
+    public Result<String> chatWithRag(@RequestBody ChatRequest request) {
+        try {
+            // 1. 根据用户的问题，去向量数据库里检索相关知识
+            List<Document> relevantDocs = vectorStore.similaritySearch(
+                    SearchRequest.query(request.getMsg()).withTopK(2).withSimilarityThreshold(0.3)
+            );
+
+            // 2. 把检索到的文档内容拼接成一个长字符串
+            String context = relevantDocs.stream()
+                    .map(Document::getContent)
+                    .collect(Collectors.joining("\n---\n"));
+
+            // 3. 组装终极 Prompt（给大模型下达指令）
+            String finalPrompt = String.format("""
+                    你是一个严谨的Java架构师。请严格根据下面提供的【背景知识】来回答用户的【问题】。
+                    如果背景知识中没有相关信息，请直接回答“抱歉，知识库中未找到相关规定”，严禁自己瞎编。
+                    
+                    【背景知识】：
+                    %s
+                    
+                    【用户问题】：
+                    %s
+                    """, context, request.getMsg());
+
+            // 4. 调用大模型并返回结果
+            String aiResponse = chatClient.prompt()
+                    .user(finalPrompt)
+                    .call()
+                    .content();
+
+            return Result.success(aiResponse);
+        } catch (Exception e) {
+            return Result.error("RAG问答失败: " + e.getMessage());
+        }
+    }
+
+    // 终极 RAG 问答接口
+    @PostMapping("/chat/rag1")
+    public Result<String> chatWithRag1(@RequestBody ChatRequest request) {
+        try {
+            // 1. 根据用户的问题，去向量数据库里检索相关知识
+            List<Document> relevantDocs = vectorStore.similaritySearch(
+                    SearchRequest.query(request.getMsg()).withTopK(2).withSimilarityThreshold(0.3)
+            );
+
+            // 2. 把检索到的文档内容拼接成一个长字符串
+            String context = relevantDocs.stream()
+                    .map(Document::getContent)
+                    .collect(Collectors.joining("\n---\n"));
+
+            // 3. 组装终极 Prompt（给大模型下达指令）
+            String finalPrompt = String.format("""
+                    你是一个严谨的Java架构师。请严格根据下面提供的【背景知识】来回答用户的【问题】。
+                    如果背景知识中没有相关信息，请直接回答“抱歉，知识库中未找到相关规定”，严禁自己瞎编。
+                    
+                    【背景知识】：
+                    %s
+                    
+                    【用户问题】：
+                    %s
+                    """, context, request.getMsg());
+
+            // 4. 调用大模型并返回结果
+            String aiResponse = chatClient.prompt()
+                    .user(finalPrompt)
+                    .call()
+                    .content();
+
+            return Result.success(aiResponse);
+        } catch (Exception e) {
+            return Result.error("RAG问答失败: " + e.getMessage());
+        }
     }
 
 }
